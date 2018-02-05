@@ -28,9 +28,12 @@ in
     # Haskell dependencies
     deps = hsPkgs: with hsPkgs; [
       brittany
+      stylish-haskell
       hindent
       hpack
       ghc-mod
+
+      streaming
 
       aeson
       attoparsec

@@ -1,0 +1,82 @@
+name: ariadne
+version: 0.0.0.0
+github: mrkgnao/ariadne
+synopsis: wip
+description: wip
+license: GPL-3
+license-file: LICENSE
+author: Soham Chowdhury
+maintainer: chow.soham@gmail.com
+copyright: wip
+build-type: Simple
+extra-source-files: 
+  - CHANGELOG.md
+
+executable:
+  main: Main.hs
+  source-dirs: src
+
+dependencies:
+  - base
+  - template-haskell
+  - scientific
+  - hashable
+  - time
+
+  - attoparsec
+
+  - aeson
+  - lens-aeson
+
+  - bytestring
+  - text
+
+  - conduit
+  - conduit-combinators
+  - conduit-extra
+  - stm-conduit
+  - streaming
+
+  - containers
+  - unordered-containers
+
+  - data-default
+  - directory
+  - exceptions
+  - filepath
+
+  - lens
+
+  - process
+  - resourcet
+  - mtl
+  - transformers
+  - transformers-base
+
+  - rel8
+  - opaleye
+
+  - sqlite-simple
+  - postgresql-simple
+
+  - beam-core
+  - beam-postgres
+  - beam-sqlite
+  - beam-migrate
+
+  - network-uri
+  - wreq
+  - http-client
+  - http-conduit
+  - http-types
+
+  - authenticate-oauth
+  - case-insensitive
+  - taggy
+  - taggy-lens
+  - tagsoup
+  - twitter-types
+  - twitter-types-lens
+
+default-extensions:
+  - LambdaCase

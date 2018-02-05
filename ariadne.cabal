@@ -1,0 +1,83 @@
+-- This file has been generated from package.yaml by hpack version 0.21.2.
+--
+-- see: https://github.com/sol/hpack
+--
+-- hash: 7a5df8a8e2d71c8bb29b1527eadcaad571cb666fc833c8b5cc057754b9017d3c
+
+name:                ariadne
+version:             0.0.0.0
+synopsis:            wip
+description:         wip
+homepage:            https://github.com/mrkgnao/ariadne#readme
+bug-reports:         https://github.com/mrkgnao/ariadne/issues
+license:             GPL-3
+license-file:        LICENSE
+author:              Soham Chowdhury
+maintainer:          chow.soham@gmail.com
+copyright:           wip
+build-type:          Simple
+cabal-version:       >= 1.10
+
+extra-source-files:
+    CHANGELOG.md
+
+source-repository head
+  type: git
+  location: https://github.com/mrkgnao/ariadne
+
+executable ariadne
+  main-is: Main.hs
+  other-modules:
+      Paths_ariadne
+  build-depends:
+      aeson
+    , attoparsec
+    , authenticate-oauth
+    , base
+    , beam-core
+    , beam-migrate
+    , beam-postgres
+    , beam-sqlite
+    , bytestring
+    , case-insensitive
+    , conduit
+    , conduit-combinators
+    , conduit-extra
+    , containers
+    , data-default
+    , directory
+    , exceptions
+    , filepath
+    , hashable
+    , http-client
+    , http-conduit
+    , http-types
+    , lens
+    , lens-aeson
+    , mtl
+    , network-uri
+    , opaleye
+    , postgresql-simple
+    , process
+    , rel8
+    , resourcet
+    , scientific
+    , sqlite-simple
+    , stm-conduit
+    , streaming
+    , taggy
+    , taggy-lens
+    , tagsoup
+    , template-haskell
+    , text
+    , time
+    , transformers
+    , transformers-base
+    , twitter-types
+    , twitter-types-lens
+    , unordered-containers
+    , wreq
+  hs-source-dirs:
+      src
+  default-extensions: LambdaCase
+  default-language: Haskell2010
