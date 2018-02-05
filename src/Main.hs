@@ -1,4 +1,5 @@
 {-# LANGUAGE Arrows                     #-}
+{-# LANGUAGE ScopedTypeVariables                     #-}
 {-# LANGUAGE BangPatterns               #-}
 {-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE DeriveGeneric              #-}
@@ -57,6 +58,8 @@ import qualified Streaming.Prelude                    as S
 
 import Prelude hiding (Int, Integer)
 
+import qualified Data.Attoparsec.Text as A
+
 ----------------------------------------------------------------------
 
 newtype EaseFcr = EaseFcr Double
@@ -71,11 +74,11 @@ newtype Quality = Quality Int16
 unQuality :: Quality -> Int16
 unQuality (Quality q) = q
 
-newtype Interval = Interval Int64
+newtype Days = Days Int64
   deriving (Show, DBType, FromField)
 
-unInterval :: Interval -> Int64
-unInterval (Interval i) = i
+unDays :: Days -> Int64
+unDays (Days i) = i
 
 ----------------------------------------------------------------------
 
@@ -90,37 +93,43 @@ mkEaseFcr !n | n < 1.2 || n > 3.0 = error "easefcr out of bounds"
 defaultEaseFcr :: EaseFcr
 defaultEaseFcr = EaseFcr 2.5
 
-defaultInterval :: Int64
-defaultInterval = 1
+defaultDaysBase :: Int64
+defaultDaysBase = 1
+
+defaultDays :: Int64
+defaultDays = 6
 
 lowerThresholdEaseFcr :: EaseFcr
 lowerThresholdEaseFcr = EaseFcr 1.3
 
-addIntervalToUTC :: Interval -> UTCTime -> UTCTime
-addIntervalToUTC (Interval s) = addUTCTime (fromIntegral s)
+addDaysToUTC :: Days -> UTCTime -> UTCTime
+addDaysToUTC (Days s) = addUTCTime (86400 * fromIntegral s)
 
 ----------------------------------------------------------------------
 
-nextRepIval :: EaseFcr -> Quality -> Interval
-nextRepIval (EaseFcr ef) (Quality q) = Interval (86400 * round (go ef q))
+-- | Calculate the interval till the next repetition based
+-- on the quality of a recall event.
+nextRepIval :: EaseFcr -> Quality -> Days
+nextRepIval (EaseFcr ef) (Quality q) 
+  = Days (round (go ef q))
  where
-  go _  1 = fromIntegral defaultInterval
-  go _  2 = 6
-  go ef n = 6 * ef ** (fromIntegral n - 2)
+  go _  1 = fromIntegral defaultDaysBase
+  go _  2 = fromIntegral defaultDays
+  go ef n = fromIntegral defaultDays * ef ** (fromIntegral n - 2)
   -- go item n = go item (n - 1) * (item ^. easeFcr . to unEaseFcr)
 
-modifiedEaseFcr :: EaseFcr -> Quality -> EaseFcr
-modifiedEaseFcr (EaseFcr ef) (Quality (fromIntegral -> q)) = max
-  lowerThresholdEaseFcr
-  updatedEaseFcr
+-- | Modify the E-factor based on the quality of a single recall.
+updatedEaseFcr :: EaseFcr -> Quality -> EaseFcr
+updatedEaseFcr (EaseFcr ef) (Quality (fromIntegral -> q)) 
+  = max lowerThresholdEaseFcr updated
  where
-  delta          = 0.1 - 0.04 * (5 - q) * (9 - q)
-  updatedEaseFcr = EaseFcr (ef + delta)
+  delta   = 0.1 - 0.04 * (5 - q) * (9 - q)
+  updated = EaseFcr (ef + delta)
 
 ----------------------------------------------------------------------
 
 newtype CardId = CardId Int64
-  deriving (Show, DBType, FromField)
+  deriving (Show, DBType, DBEq, FromField)
 
 makePrisms ''CardId
 
@@ -129,18 +138,42 @@ data Card f = Card
   , _easeFcr  :: C f "ease_factor" 'NoDefault  EaseFcr
   , _repsDone :: C f "reps_done"   'NoDefault  Int64
   , _nextDue  :: C f "next_due"    'NoDefault  UTCTime
-  , _interval :: C f "interval"    'NoDefault  Interval
+  , _interval :: C f "interval"    'NoDefault  Days
   , _front    :: C f "front"       'NoDefault  Text
   , _back     :: C f "back"        'NoDefault  Text
   } deriving (Generic)
 
 makeLenses ''Card
 
+type CardQ = Card QueryResult
+type CardE = Card Expr
+
 instance BaseTable Card where tableName = "card"
 
 instance (e ~ Expr, q ~ QueryResult) => Table (Card e) (Card q)
 
 deriving instance (q ~ QueryResult) => Show (Card q)
+
+updateCard :: UTCTime -> CardQ -> Quality -> CardQ
+updateCard curr c@Card{..} q =
+  c { _repsDone = _repsDone'
+    , _nextDue = _nextDue'
+    , _interval = _interval'
+    , _easeFcr = _easeFcr'
+    }
+  where
+    bad = unQuality q < 3
+
+    _interval' = nextRepIval _easeFcr q
+    _nextDue' = addDaysToUTC _interval' curr
+
+    _repsDone' 
+      | bad = 1
+      | otherwise = _repsDone + 1
+
+    _easeFcr' 
+      | bad = _easeFcr
+      | otherwise = updatedEaseFcr _easeFcr q
 
 connInfo :: PGS.ConnectInfo
 connInfo = PGS.defaultConnectInfo { PGS.connectDatabase = "procon"
@@ -155,31 +188,62 @@ runSelect :: Show a => Table rows a => Query rows -> Connection -> IO ()
 runSelect q conn =
   runResourceT (S.mapM_ (lift . print) (R.select (R.stream conn) q))
 
+exprOf :: CardQ -> CardE
+exprOf Card{..} = Card 
+  { _interval = lit _interval
+  , _cardId = lit _cardId
+  , _easeFcr = lit _easeFcr
+  , _repsDone = lit _repsDone
+  , _nextDue = lit _nextDue
+  , _front = lit _front
+  , _back = lit _back
+  }
+
+parseQuality :: A.Parser Quality
+parseQuality = Quality <$> A.decimal
+
 demo :: IO ()
 demo = do
   conn <- PGS.connect connInfo
-  -- R.update conn
-  --          (\part -> _partId part ==. lit 5)
-  --          (\part -> part { _partColor = lit "red" })
-  -- R.delete @Part @Bool conn (\_ -> lit True)
   curr <- getCurrentTime
-  runResourceT $ S.mapM_ (lift . print) $ 
-    R.insertReturning
-      (R.stream conn)
-      [ Card
-          { _cardId   = InsertDefault
-          , _easeFcr  = lit defaultEaseFcr
-          , _repsDone = lit 0
-          , _nextDue  = lit curr
-          , _interval = lit (Interval 0)
-          , _front    = lit "Question?"
-          , _back     = lit "Answer"
-          }
-      ]
+  -- R.delete @Card @Bool conn (\_ -> lit True)
+  -- runResourceT $ S.mapM_ (lift . print) $ 
+  --   R.insertReturning
+  --     (R.stream conn)
+  --     [ Card
+  --         { _cardId   = InsertDefault
+  --         , _easeFcr  = lit defaultEaseFcr
+  --         , _repsDone = lit 0
+  --         , _nextDue  = lit curr
+  --         , _interval = lit (Days 0)
+  --         , _front    = lit "Sample question 2?"
+  --         , _back     = lit "Sample answer 2"
+  --         }
+  --     ]
 
-  putStrLn "Cards now:"
-  runResourceT $ flip S.mapM_ (R.select (R.stream conn) allCards) $ \c -> 
-    lift (T.putStrLn (tshow (c ^. cardId . _CardId) <> ": " <> c ^. front <> " / " <> c ^. back))
+  runResourceT $ flip S.mapM_ (R.select (R.stream conn) allCards) $ \c -> do
+    lift $ do
+      T.putStrLn ("\n#" <> tshow (c ^. cardId . _CardId))
+      T.putStrLn ("Front: " <> c ^. front)
+      T.putStrLn ("Back: " <> c ^. back)
+      T.putStrLn (tshow (c ^. easeFcr))
+      T.putStrLn (tshow (c ^. interval))
+      T.putStrLn ""
+      putStr "Quality: "
+    
+    i' <- A.parseOnly parseQuality <$> lift T.getLine
+    case i' of
+      Left _ -> lift (T.putStrLn "Error: bad quality")
+      Right i -> do
+        let upd = updateCard curr c i
+
+        R.update conn (\c' -> lit (c ^. cardId) ==. c' ^. cardId) (\_ -> exprOf upd)
+
+        lift $ do
+          T.putStrLn ""
+          T.putStrLn (tshow (upd ^. easeFcr))
+          T.putStrLn (tshow (upd ^. interval))
+          T.putStrLn "\n------"
 
 allCards :: O.Query (Card Expr)
 allCards = queryTable
