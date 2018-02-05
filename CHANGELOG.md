@@ -1,4 +1,4 @@
-# Revision history for ariadne
+# Revision history for prosthetic-conscience
 
 ## 0.0.0.0  -- YYYY-mm-dd
 

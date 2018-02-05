@@ -2,33 +2,36 @@
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 7a5df8a8e2d71c8bb29b1527eadcaad571cb666fc833c8b5cc057754b9017d3c
+-- hash: 087522a26211131088d44f0b98d6de789553c7f9dab7d70477b6fb6f0382eac0
 
-name:                ariadne
-version:             0.0.0.0
-synopsis:            wip
-description:         wip
-homepage:            https://github.com/mrkgnao/ariadne#readme
-bug-reports:         https://github.com/mrkgnao/ariadne/issues
-license:             GPL-3
-license-file:        LICENSE
-author:              Soham Chowdhury
-maintainer:          chow.soham@gmail.com
-copyright:           wip
-build-type:          Simple
-cabal-version:       >= 1.10
+name:           prosthetic-conscience
+version:        0.0.0.0
+synopsis:       wip
+description:    wip
+homepage:       https://github.com/mrkgnao/prosthetic-conscience#readme
+bug-reports:    https://github.com/mrkgnao/prosthetic-conscience/issues
+author:         Soham Chowdhury
+maintainer:     chow.soham@gmail.com
+copyright:      wip
+license:        GPL-3
+license-file:   LICENSE
+build-type:     Simple
+cabal-version:  >= 1.10
 
 extra-source-files:
     CHANGELOG.md
 
 source-repository head
   type: git
-  location: https://github.com/mrkgnao/ariadne
+  location: https://github.com/mrkgnao/prosthetic-conscience
 
-executable ariadne
+executable prosthetic-conscience
   main-is: Main.hs
   other-modules:
-      Paths_ariadne
+      Paths_prosthetic_conscience
+  hs-source-dirs:
+      src
+  default-extensions: LambdaCase
   build-depends:
       aeson
     , attoparsec
@@ -77,7 +80,4 @@ executable ariadne
     , twitter-types-lens
     , unordered-containers
     , wreq
-  hs-source-dirs:
-      src
-  default-extensions: LambdaCase
   default-language: Haskell2010

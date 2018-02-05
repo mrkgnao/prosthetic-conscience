@@ -143,7 +143,7 @@ instance (e ~ Expr, q ~ QueryResult) => Table (Card e) (Card q)
 deriving instance (q ~ QueryResult) => Show (Card q)
 
 connInfo :: PGS.ConnectInfo
-connInfo = PGS.defaultConnectInfo { PGS.connectDatabase = "ariadne"
+connInfo = PGS.defaultConnectInfo { PGS.connectDatabase = "procon"
                                   , PGS.connectUser     = "frob"
                                   , PGS.connectPassword = "frob"
                                   }
