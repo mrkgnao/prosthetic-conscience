@@ -1,6 +1,6 @@
 let 
   rien = import ../rien/rien.nix {
-    packageName = "hello-world";
+    packageName = "prosthetic-conscience";
     packagePath = ./.;
 
     # Instead of using <nixpkgs>, use a lock-file to stick to
