@@ -2,7 +2,7 @@
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 087522a26211131088d44f0b98d6de789553c7f9dab7d70477b6fb6f0382eac0
+-- hash: c2dc9ce37e72b2d9bb29d8d9aa1072da2b6b8f0483eeee29f1d5f06e461d55e3
 
 name:           prosthetic-conscience
 version:        0.0.0.0
@@ -68,6 +68,8 @@ executable prosthetic-conscience
     , sqlite-simple
     , stm-conduit
     , streaming
+    , streaming-bytestring
+    , streaming-utils
     , taggy
     , taggy-lens
     , tagsoup

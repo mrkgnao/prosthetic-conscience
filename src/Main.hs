@@ -1,5 +1,4 @@
 {-# LANGUAGE Arrows                     #-}
-{-# LANGUAGE ScopedTypeVariables                     #-}
 {-# LANGUAGE BangPatterns               #-}
 {-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE DeriveGeneric              #-}
@@ -11,6 +10,7 @@
 {-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE StandaloneDeriving         #-}
 {-# LANGUAGE TemplateHaskell            #-}
 {-# LANGUAGE TypeApplications           #-}
@@ -20,7 +20,6 @@
 module Main where
 
 import           Control.Applicative
-import           Control.Arrow
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.IO.Class
@@ -31,6 +30,7 @@ import           Control.Monad.Trans.Class
 import           Control.Monad.Trans.Resource         (runResourceT)
 import           Data.Default
 import           Data.Foldable
+import           Data.Functor
 import           Data.Hashable
 import           Data.Maybe
 import           Data.Monoid
@@ -54,11 +54,42 @@ import           Database.PostgreSQL.Simple.FromField (FieldParser,
 import qualified Opaleye                              as O
 import           Rel8                                 hiding (max)
 import qualified Rel8.IO                              as R
+import           Streaming
 import qualified Streaming.Prelude                    as S
 
-import Prelude hiding (Int, Integer)
+import           Prelude                              hiding (Int, Integer)
 
-import qualified Data.Attoparsec.Text as A
+import qualified Data.Attoparsec.ByteString           as ABS
+import qualified Data.Attoparsec.Text                 as AT
+
+import qualified Data.Attoparsec.ByteString           as A
+import qualified Data.Attoparsec.ByteString.Char8     as AQ
+import qualified Data.Attoparsec.ByteString.Streaming as A
+import qualified Data.ByteString                      as BS
+import qualified Data.ByteString.Streaming.Char8      as Q
+import qualified Data.Text.Encoding                   as TE
+
+import           System.IO                            (IOMode (..), withFile)
+
+import           Control.Arrow                        ((>>>))
+
+getCardData :: FilePath -> IO [(Text, Text)]
+getCardData file = withFile
+  file
+  ReadMode
+  (   Q.fromHandle
+  >>> A.parsed parseTwoSided
+  >>> void
+  >>> S.map (\(a, b) -> (f a, f b))
+  >>> S.toList_
+  )
+  where f = TE.decodeUtf8
+
+parseTwoSided :: A.Parser (BS.ByteString, BS.ByteString)
+parseTwoSided = (,) <$> front <*> back
+ where
+  front = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n<<<\n")
+  back  = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n>>>\n")
 
 ----------------------------------------------------------------------
 
@@ -110,8 +141,7 @@ addDaysToUTC (Days s) = addUTCTime (86400 * fromIntegral s)
 -- | Calculate the interval till the next repetition based
 -- on the quality of a recall event.
 nextRepIval :: EaseFcr -> Quality -> Days
-nextRepIval (EaseFcr ef) (Quality q) 
-  = Days (round (go ef q))
+nextRepIval (EaseFcr ef) (Quality q) = Days (round (go ef q))
  where
   go _  1 = fromIntegral defaultDaysBase
   go _  2 = fromIntegral defaultDays
@@ -120,8 +150,9 @@ nextRepIval (EaseFcr ef) (Quality q)
 
 -- | Modify the E-factor based on the quality of a single recall.
 updatedEaseFcr :: EaseFcr -> Quality -> EaseFcr
-updatedEaseFcr (EaseFcr ef) (Quality (fromIntegral -> q)) 
-  = max lowerThresholdEaseFcr updated
+updatedEaseFcr (EaseFcr ef) (Quality (fromIntegral -> q)) = max
+  lowerThresholdEaseFcr
+  updated
  where
   delta   = 0.1 - 0.04 * (5 - q) * (9 - q)
   updated = EaseFcr (ef + delta)
@@ -155,25 +186,22 @@ instance (e ~ Expr, q ~ QueryResult) => Table (Card e) (Card q)
 deriving instance (q ~ QueryResult) => Show (Card q)
 
 updateCard :: UTCTime -> CardQ -> Quality -> CardQ
-updateCard curr c@Card{..} q =
-  c { _repsDone = _repsDone'
-    , _nextDue = _nextDue'
-    , _interval = _interval'
-    , _easeFcr = _easeFcr'
-    }
-  where
-    bad = unQuality q < 3
+updateCard curr c@Card {..} q = c { _repsDone = _repsDone'
+                                  , _nextDue  = _nextDue'
+                                  , _interval = _interval'
+                                  , _easeFcr  = _easeFcr'
+                                  }
+ where
+  bad        = unQuality q < 3
 
-    _interval' = nextRepIval _easeFcr q
-    _nextDue' = addDaysToUTC _interval' curr
+  _interval' = nextRepIval _easeFcr q
+  _nextDue'  = addDaysToUTC _interval' curr
 
-    _repsDone' 
-      | bad = 1
-      | otherwise = _repsDone + 1
+  _repsDone' | bad       = 1
+             | otherwise = _repsDone + 1
 
-    _easeFcr' 
-      | bad = _easeFcr
-      | otherwise = updatedEaseFcr _easeFcr q
+  _easeFcr' | bad       = _easeFcr
+            | otherwise = updatedEaseFcr _easeFcr q
 
 connInfo :: PGS.ConnectInfo
 connInfo = PGS.defaultConnectInfo { PGS.connectDatabase = "procon"
@@ -189,55 +217,71 @@ runSelect q conn =
   runResourceT (S.mapM_ (lift . print) (R.select (R.stream conn) q))
 
 exprOf :: CardQ -> CardE
-exprOf Card{..} = Card 
+exprOf Card {..} = Card
   { _interval = lit _interval
-  , _cardId = lit _cardId
-  , _easeFcr = lit _easeFcr
+  , _cardId   = lit _cardId
+  , _easeFcr  = lit _easeFcr
   , _repsDone = lit _repsDone
-  , _nextDue = lit _nextDue
-  , _front = lit _front
-  , _back = lit _back
+  , _nextDue  = lit _nextDue
+  , _front    = lit _front
+  , _back     = lit _back
   }
 
-parseQuality :: A.Parser Quality
-parseQuality = Quality <$> A.decimal
+parseQuality :: AT.Parser Quality
+parseQuality = Quality <$> AT.decimal
+
+-- test :: Text
+-- test = T.unlines [ "Integral substitution for $(ax^2 + bx + c)^{1/2}$ with $a > 0$."
+--                  , "~~~~~"
+--                  , "$(ax^2 + bx + c)^{1/2} = t - \\sqrt{a}x"
+--                  , "!!"
+--                  , "~~~~~"
+--                  ]
+
+loadCards :: IO ()
+loadCards = do
+  conn  <- PGS.connect connInfo
+  curr  <- getCurrentTime
+  cards <- getCardData "cards.txt"
+  for_ cards $ \(front, back) ->
+    runResourceT $ S.mapM_ (lift . print) $ R.insertReturning
+      (R.stream conn)
+      [ Card
+          { _cardId   = InsertDefault
+          , _easeFcr  = lit defaultEaseFcr
+          , _repsDone = lit 0
+          , _nextDue  = lit curr
+          , _interval = lit (Days 0)
+          , _front    = lit front
+          , _back     = lit back
+          }
+      ]
 
 demo :: IO ()
 demo = do
   conn <- PGS.connect connInfo
   curr <- getCurrentTime
   -- R.delete @Card @Bool conn (\_ -> lit True)
-  -- runResourceT $ S.mapM_ (lift . print) $ 
-  --   R.insertReturning
-  --     (R.stream conn)
-  --     [ Card
-  --         { _cardId   = InsertDefault
-  --         , _easeFcr  = lit defaultEaseFcr
-  --         , _repsDone = lit 0
-  --         , _nextDue  = lit curr
-  --         , _interval = lit (Days 0)
-  --         , _front    = lit "Sample question 2?"
-  --         , _back     = lit "Sample answer 2"
-  --         }
-  --     ]
-
   runResourceT $ flip S.mapM_ (R.select (R.stream conn) allCards) $ \c -> do
     lift $ do
       T.putStrLn ("\n#" <> tshow (c ^. cardId . _CardId))
-      T.putStrLn ("Front: " <> c ^. front)
-      T.putStrLn ("Back: " <> c ^. back)
+      T.putStrLn ("\nFront:\n" <> c ^. front)
+      T.putStrLn ("\nBack:\n" <> c ^. back)
+      T.putStrLn "\n"
       T.putStrLn (tshow (c ^. easeFcr))
       T.putStrLn (tshow (c ^. interval))
       T.putStrLn ""
       putStr "Quality: "
-    
-    i' <- A.parseOnly parseQuality <$> lift T.getLine
+
+    i' <- AT.parseOnly parseQuality <$> lift T.getLine
     case i' of
-      Left _ -> lift (T.putStrLn "Error: bad quality")
+      Left  _ -> lift (T.putStrLn "Error: bad quality")
       Right i -> do
         let upd = updateCard curr c i
 
-        R.update conn (\c' -> lit (c ^. cardId) ==. c' ^. cardId) (\_ -> exprOf upd)
+        R.update conn
+                 (\c' -> lit (c ^. cardId) ==. c' ^. cardId)
+                 (\_ -> exprOf upd)
 
         lift $ do
           T.putStrLn ""

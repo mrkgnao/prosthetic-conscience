@@ -10,7 +10,7 @@ let
     ghcVersion = "ghc822";
 
     overrides = rec {
-      jailbreak = [ "cabal-helper" "ghc-mod" "liquidhaskell" ];
+      jailbreak = [ "cabal-helper" "ghc-mod" "liquidhaskell" "streaming-utils" ];
       skipHaddock = justStaticExecutables;
       skipTests = [ "cabal-helper" "ghc-mod" "tweet-hs" ];
       justStaticExecutables = [ 
@@ -82,6 +82,8 @@ in
       beam-postgres
       beam-migrate
       beam-migrate-cli
+      streaming-utils
+      streaming-bytestring
     ];
 
     # Optionally, also add sets of related packages that are

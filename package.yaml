@@ -36,6 +36,8 @@ dependencies:
   - conduit-extra
   - stm-conduit
   - streaming
+  - streaming-utils
+  - streaming-bytestring
 
   - containers
   - unordered-containers
