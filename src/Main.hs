@@ -73,24 +73,6 @@ import           System.IO                            (IOMode (..), withFile)
 
 import           Control.Arrow                        ((>>>))
 
-getCardData :: FilePath -> IO [(Text, Text)]
-getCardData file = withFile
-  file
-  ReadMode
-  (   Q.fromHandle
-  >>> A.parsed parseTwoSided
-  >>> void
-  >>> S.map (\(a, b) -> (f a, f b))
-  >>> S.toList_
-  )
-  where f = TE.decodeUtf8
-
-parseTwoSided :: A.Parser (BS.ByteString, BS.ByteString)
-parseTwoSided = (,) <$> front <*> back
- where
-  front = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n<<<\n")
-  back  = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n>>>\n")
-
 ----------------------------------------------------------------------
 
 newtype EaseFcr = EaseFcr Double
@@ -230,19 +212,12 @@ exprOf Card {..} = Card
 parseQuality :: AT.Parser Quality
 parseQuality = Quality <$> AT.decimal
 
--- test :: Text
--- test = T.unlines [ "Integral substitution for $(ax^2 + bx + c)^{1/2}$ with $a > 0$."
---                  , "~~~~~"
---                  , "$(ax^2 + bx + c)^{1/2} = t - \\sqrt{a}x"
---                  , "!!"
---                  , "~~~~~"
---                  ]
-
 loadCards :: IO ()
 loadCards = do
   conn  <- PGS.connect connInfo
   curr  <- getCurrentTime
   cards <- getCardData "cards.txt"
+  R.delete @Card conn (\_ -> lit True)
   for_ cards $ \(front, back) ->
     runResourceT $ S.mapM_ (lift . print) $ R.insertReturning
       (R.stream conn)
@@ -257,11 +232,29 @@ loadCards = do
           }
       ]
 
+getCardData :: FilePath -> IO [(Text, Text)]
+getCardData file = withFile
+  file
+  ReadMode
+  (   Q.fromHandle
+  >>> A.parsed parseTwoSided
+  >>> void
+  >>> S.map (\(a, b) -> (f a, f b))
+  >>> S.toList_
+  )
+  where f = TE.decodeUtf8
+
+parseTwoSided :: A.Parser (BS.ByteString, BS.ByteString)
+parseTwoSided = (,) <$> front <*> back
+ where
+  front = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n<<<\n")
+  back  = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n>>>\n")
+
+
 demo :: IO ()
 demo = do
   conn <- PGS.connect connInfo
   curr <- getCurrentTime
-  -- R.delete @Card @Bool conn (\_ -> lit True)
   runResourceT $ flip S.mapM_ (R.select (R.stream conn) allCards) $ \c -> do
     lift $ do
       T.putStrLn ("\n#" <> tshow (c ^. cardId . _CardId))
