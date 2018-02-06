@@ -210,12 +210,12 @@ parseQuality = Quality <$> AT.decimal
 -- Parsing and loading cards from disk
 ----------------------------------------------------------------------
 
-data CardSide = Front | Back
+data Section = Front | Back
   deriving (Show, Eq)
 
 data ParsedElement a
-  = CardStart
-  | Marker CardSide
+  = StartCard
+  | StartSection Section
   | BlankLine
   | LineOfText !a
   deriving (Show, Functor, Foldable, Eq)
@@ -224,62 +224,69 @@ type B = BS.ByteString
 type P = ParsedElement B
 
 data FoldState
-  = AwaitQues
-  | InQues !Int
-  | AwaitAns
-  | InAns !Int
+  = Initial
+  | Await !Section
+  | Inside !Section !Int
+  deriving (Show)
 
 parseLine :: A.Parser (ParsedElement BS.ByteString)
 parseLine =
   (BlankLine <$ AQ.endOfLine)
-    <|> (Marker Front <$ A.string "???" <* AQ.endOfLine)
-    <|> (Marker Back <$ A.string "!!!" <* AQ.endOfLine)
-    <|> (CardStart <$ A.string "%%% CARD_START" <* AQ.endOfLine)
+    <|> A.string "%%%"
+    *>  A.skipMany1 AQ.space
+    *>  (   (StartSection Front <$ A.string "FRONT" <* AQ.endOfLine)
+        <|> (StartSection Back <$ A.string "BACK" <* AQ.endOfLine)
+        <|> (StartCard <$ A.string "CARD_START" <* AQ.endOfLine)
+        )
     <|> (LineOfText <$> A.takeTill AQ.isEndOfLine <* AQ.endOfLine)
 
 streamedTokens :: Handle -> Stream (Of P) IO ()
-streamedTokens = 
-  Q.fromHandle
-    >>> A.parsed parseLine -- preprocess
-    >>> void -- discard any pending input
+streamedTokens =
+  Q.fromHandle >>> A.parsed parseLine -- preprocess
+                                      >>> void -- discard any pending input
 
 -- | Stream card (front, back) pairs from a file handle.
 streamCardsFrom :: Handle -> Stream (Of (B, B)) IO ()
-streamCardsFrom = streamedTokens
-    >>> S.split (Marker Front)
-    >>> S.mapped (S.fold go' (AwaitQues, ("", "")) snd)
+streamCardsFrom = streamedTokens >>> S.split StartCard >>> S.mapped
+  (S.fold go' (Initial, ("", "")) snd)
  where
   go' :: (FoldState, (B, B)) -> P -> (FoldState, (B, B))
   go' (st, (q, a)) p = let (st', q', a') = go st q a p in (st', (q', a'))
 
   go :: FoldState -> B -> B -> P -> (FoldState, B, B)
-  go s q a CardStart = (s, q, a)
-  -- Skip blank lines before the question starts
-  go AwaitQues  q a BlankLine      = (AwaitQues, q, a)
-  -- First nonempty line.
-  go AwaitQues  _ a (LineOfText t) = (InQues 0, t, a)
+  -- Skip blank lines before the card starts
+  go Initial          q a BlankLine            = (Initial, q, a)
+  -- Start of the front of the card
+  go Initial          q a (StartSection Front) = (Await Front, q, a)
 
-  -- Add a newline to the pending queue.
-  go (InQues n) q a BlankLine      = (InQues (n + 1), q, a)
-  -- Append text and any pending newlines.
-  go (InQues n) q a (LineOfText t) = (InQues 0, q <> ns <> t, a)
-    where ns = BS.replicate n newlineWord8
-  -- On reaching the answer marker, discard any newlines.
-  go (InQues _) q a (Marker Back)   = (AwaitAns, q, a)
+  -- Skip blank lines before the front starts
+  go (Await Front   ) q a BlankLine            = (Await Front, q, a)
+  -- First nonempty line of the front
+  go (Await Front   ) _ a (LineOfText t)       = (Inside Front 0, t, a)
 
-  -- Skip preceding newlines.
-  go AwaitAns   q a BlankLine      = (AwaitAns, q, a)
-  -- First nonempty line.
-  go AwaitAns   q _ (LineOfText t) = (InAns 0, q, t)
+  -- Add a newline to the pending queue
+  go (Inside Front n) q a BlankLine            = (Inside Front (n + 1), q, a)
+  -- Append text and any pending newlines
+  go (Inside Front n) q a (LineOfText t) = (Inside Front 0, q <> ns <> t, a)
+    where ns = BS.replicate (n + 1) newlineWord8
+  -- On reaching the back marker, discard any newlines
+  go (Inside Front _) q a (StartSection Back) = (Await Back, q, a)
 
-  -- Add a newline to the queue.
-  go (InAns n)  q a BlankLine      = (InAns (n + 1), q, a)
-  -- Append text and any pending newlines.
-  go (InAns n)  q a (LineOfText t) = (InAns 0, q, a <> ns <> t)
-    where ns = BS.replicate n newlineWord8
+  -- Skip preceding newlines
+  go (Await Back    ) q a BlankLine           = (Await Back, q, a)
+  -- First nonempty line
+  go (Await Back    ) q _ (LineOfText t)      = (Inside Back 0, q, t)
 
-  newlineWord8 :: Word8
-  newlineWord8 = fromIntegral (fromEnum '\n')
+  -- Add a newline to the queue
+  go (Inside Back n ) q a BlankLine           = (Inside Back (n + 1), q, a)
+  -- Append text and any pending newlines
+  go (Inside Back n ) q a (LineOfText t)      = (Inside Back 0, q, a <> ns <> t)
+    where ns = BS.replicate (n + 1) newlineWord8
+
+  go s q a t = error (unlines [show s, show q, show a, show t])
+
+newlineWord8 :: Word8
+newlineWord8 = fromIntegral (fromEnum '\n')
 
 makeCard :: UTCTime -> (BS.ByteString, BS.ByteString) -> Card Insert
 makeCard curr (front, back) = Card
@@ -304,7 +311,8 @@ exprOf Card {..} = Card
   }
 
 clearAllCards :: IO Int64
-clearAllCards = PGS.connect connInfo >>= \conn -> R.delete @Card conn (\_ -> lit True)
+clearAllCards =
+  PGS.connect connInfo >>= \conn -> R.delete @Card conn (\_ -> lit True)
 
 loadCards :: FilePath -> IO ()
 loadCards file = do
