@@ -360,14 +360,15 @@ demo = do
     lift $ do
       T.putStrLn ("\n#" <> tshow (c ^. cardId . _CardId))
       T.putStrLn ("\nFront:\n" <> c ^. front)
-      T.putStrLn ("\nBack:\n" <> c ^. back)
       T.putStrLn "\nMetadata:"
       T.putStrLn ("  " <> tshow (c ^. easeFcr))
       T.putStrLn ("  " <> tshow (c ^. interval))
       T.putStrLn ("  " <> c ^. nextDue . to formattedTime)
-      T.putStrLn ""
-      putStr "Enter quality (0-5 inclusive): "
 
+    lift $ T.putStr "Press Return to show answer."
+    _ <- lift T.getLine
+    lift $ T.putStrLn ("\nBack:\n" <> c ^. back <> "\n")
+    lift $ putStr "Enter quality (0-5 inclusive): "
     i' <- AT.parseOnly parseQuality <$> lift T.getLine
     case i' of
       Left  _ -> lift (T.putStrLn "Error: bad quality entered, skipping.")
