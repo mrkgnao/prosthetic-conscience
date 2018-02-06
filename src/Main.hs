@@ -1,6 +1,8 @@
 {-# LANGUAGE Arrows                     #-}
 {-# LANGUAGE BangPatterns               #-}
 {-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DeriveFoldable             #-}
+{-# LANGUAGE DeriveFunctor              #-}
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE ExplicitForAll             #-}
 {-# LANGUAGE FlexibleInstances          #-}
@@ -69,9 +71,12 @@ import qualified Data.ByteString                      as BS
 import qualified Data.ByteString.Streaming.Char8      as Q
 import qualified Data.Text.Encoding                   as TE
 
-import           System.IO                            (IOMode (..), withFile)
+import           System.IO                            (Handle, IOMode (..),
+                                                       withFile)
 
 import           Control.Arrow                        ((>>>))
+import           Data.Word
+import qualified Debug.Trace                          as Trace
 
 ----------------------------------------------------------------------
 
@@ -198,6 +203,95 @@ runSelect :: Show a => Table rows a => Query rows -> Connection -> IO ()
 runSelect q conn =
   runResourceT (S.mapM_ (lift . print) (R.select (R.stream conn) q))
 
+parseQuality :: AT.Parser Quality
+parseQuality = Quality <$> AT.decimal
+
+----------------------------------------------------------------------
+-- Parsing and loading cards from disk
+----------------------------------------------------------------------
+
+data CardSide = Front | Back
+  deriving (Show, Eq)
+
+data ParsedElement a
+  = CardStart
+  | Marker CardSide
+  | BlankLine
+  | LineOfText !a
+  deriving (Show, Functor, Foldable, Eq)
+
+type B = BS.ByteString
+type P = ParsedElement B
+
+data FoldState
+  = AwaitQues
+  | InQues !Int
+  | AwaitAns
+  | InAns !Int
+
+parseLine :: A.Parser (ParsedElement BS.ByteString)
+parseLine =
+  (BlankLine <$ AQ.endOfLine)
+    <|> (Marker Front <$ A.string "???" <* AQ.endOfLine)
+    <|> (Marker Back <$ A.string "!!!" <* AQ.endOfLine)
+    <|> (CardStart <$ A.string "%%% CARD_START" <* AQ.endOfLine)
+    <|> (LineOfText <$> A.takeTill AQ.isEndOfLine <* AQ.endOfLine)
+
+streamedTokens :: Handle -> Stream (Of P) IO ()
+streamedTokens = 
+  Q.fromHandle
+    >>> A.parsed parseLine -- preprocess
+    >>> void -- discard any pending input
+
+-- | Stream card (front, back) pairs from a file handle.
+streamCardsFrom :: Handle -> Stream (Of (B, B)) IO ()
+streamCardsFrom = streamedTokens
+    >>> S.split (Marker Front)
+    >>> S.mapped (S.fold go' (AwaitQues, ("", "")) snd)
+ where
+  go' :: (FoldState, (B, B)) -> P -> (FoldState, (B, B))
+  go' (st, (q, a)) p = let (st', q', a') = go st q a p in (st', (q', a'))
+
+  go :: FoldState -> B -> B -> P -> (FoldState, B, B)
+  go s q a CardStart = (s, q, a)
+  -- Skip blank lines before the question starts
+  go AwaitQues  q a BlankLine      = (AwaitQues, q, a)
+  -- First nonempty line.
+  go AwaitQues  _ a (LineOfText t) = (InQues 0, t, a)
+
+  -- Add a newline to the pending queue.
+  go (InQues n) q a BlankLine      = (InQues (n + 1), q, a)
+  -- Append text and any pending newlines.
+  go (InQues n) q a (LineOfText t) = (InQues 0, q <> ns <> t, a)
+    where ns = BS.replicate n newlineWord8
+  -- On reaching the answer marker, discard any newlines.
+  go (InQues _) q a (Marker Back)   = (AwaitAns, q, a)
+
+  -- Skip preceding newlines.
+  go AwaitAns   q a BlankLine      = (AwaitAns, q, a)
+  -- First nonempty line.
+  go AwaitAns   q _ (LineOfText t) = (InAns 0, q, t)
+
+  -- Add a newline to the queue.
+  go (InAns n)  q a BlankLine      = (InAns (n + 1), q, a)
+  -- Append text and any pending newlines.
+  go (InAns n)  q a (LineOfText t) = (InAns 0, q, a <> ns <> t)
+    where ns = BS.replicate n newlineWord8
+
+  newlineWord8 :: Word8
+  newlineWord8 = fromIntegral (fromEnum '\n')
+
+makeCard :: UTCTime -> (BS.ByteString, BS.ByteString) -> Card Insert
+makeCard curr (front, back) = Card
+  { _cardId   = InsertDefault
+  , _easeFcr  = lit defaultEaseFcr
+  , _repsDone = lit 0
+  , _nextDue  = lit curr
+  , _interval = lit (Days 0)
+  , _front    = lit (TE.decodeUtf8 front)
+  , _back     = lit (TE.decodeUtf8 back)
+  }
+
 exprOf :: CardQ -> CardE
 exprOf Card {..} = Card
   { _interval = lit _interval
@@ -209,47 +303,32 @@ exprOf Card {..} = Card
   , _back     = lit _back
   }
 
-parseQuality :: AT.Parser Quality
-parseQuality = Quality <$> AT.decimal
+clearAllCards :: IO Int64
+clearAllCards = PGS.connect connInfo >>= \conn -> R.delete @Card conn (\_ -> lit True)
 
-loadCards :: IO ()
-loadCards = do
-  conn  <- PGS.connect connInfo
-  curr  <- getCurrentTime
-  cards <- getCardData "cards.txt"
-  R.delete @Card conn (\_ -> lit True)
-  for_ cards $ \(front, back) ->
-    runResourceT $ S.mapM_ (lift . print) $ R.insertReturning
-      (R.stream conn)
-      [ Card
-          { _cardId   = InsertDefault
-          , _easeFcr  = lit defaultEaseFcr
-          , _repsDone = lit 0
-          , _nextDue  = lit curr
-          , _interval = lit (Days 0)
-          , _front    = lit front
-          , _back     = lit back
-          }
-      ]
+loadCards :: FilePath -> IO ()
+loadCards file = do
+  conn <- PGS.connect connInfo
+  curr <- getCurrentTime
+  -- R.delete @Card conn (\_ -> lit True)
+  withFile file ReadMode $ streamCardsFrom >>> S.mapM_
+    ( \(front, back) -> do
+      let front' = TE.decodeUtf8 front
+          back'  = TE.decodeUtf8 back
+      l <- runResourceT
+        (S.length_ (R.select (R.stream conn) (cardsWithFront front')))
+      if l == 0
+        then void $ do
+          T.putStr "New card: "
+          R.insert @Card conn [makeCard curr (front, back)]
+        else T.putStrLn "Skipping card: "
+      T.putStrLn (front' <> " / " <> back' <> "\n")
+    )
 
-getCardData :: FilePath -> IO [(Text, Text)]
-getCardData file = withFile
-  file
-  ReadMode
-  (   Q.fromHandle
-  >>> A.parsed parseTwoSided
-  >>> void
-  >>> S.map (\(a, b) -> (f a, f b))
-  >>> S.toList_
-  )
-  where f = TE.decodeUtf8
+cardsWithFront :: Text -> O.Query (Card Expr)
+cardsWithFront t = filterQuery (\c -> c ^. front ==. lit t) allCards
 
-parseTwoSided :: A.Parser (BS.ByteString, BS.ByteString)
-parseTwoSided = (,) <$> front <*> back
- where
-  front = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n<<<\n")
-  back  = BS.pack <$> A.manyTill A.anyWord8 (A.string "\n>>>\n")
-
+----------------------------------------------------------------------
 
 demo :: IO ()
 demo = do
@@ -260,11 +339,11 @@ demo = do
       T.putStrLn ("\n#" <> tshow (c ^. cardId . _CardId))
       T.putStrLn ("\nFront:\n" <> c ^. front)
       T.putStrLn ("\nBack:\n" <> c ^. back)
-      T.putStrLn "\n"
+      T.putStrLn ""
       T.putStrLn (tshow (c ^. easeFcr))
       T.putStrLn (tshow (c ^. interval))
       T.putStrLn ""
-      putStr "Quality: "
+      putStr "Enter quality (0-5 inclusive): "
 
     i' <- AT.parseOnly parseQuality <$> lift T.getLine
     case i' of

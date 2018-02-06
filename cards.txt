@@ -1,0 +1,20 @@
+%%% CARD_START
+???
+Integral substitution for $(ax^2 + bx + c)^{1/2}$ with $a > 0$.
+!!!
+$(ax^2 + bx + c)^{1/2} = t - \\sqrt{a}x$
+First Euler sub
+
+%%% CARD_START
+???
+Integral substitution for $(ax^2 + bx + c)^{1/2}$ with $c > 0$.
+!!!
+$(ax^2 + bx + c)^{1/2} = xt + \\sqrt{c}$
+Second Euler sub
+
+%%% CARD_START
+???
+When you notice yourself pulling your hair what should you do?
+!!!
+Reflect on what you were just thinking about.
+
