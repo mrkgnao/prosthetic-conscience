@@ -55,11 +55,12 @@ import           Database.PostgreSQL.Simple.FromField (FieldParser,
                                                        FromField (..))
 import qualified Opaleye                              as O
 import           Rel8                                 hiding (max)
+import qualified Rel8.Internal                        as RI 
 import qualified Rel8.IO                              as R
 import           Streaming
 import qualified Streaming.Prelude                    as S
 
-import           Prelude                              hiding (Int, Integer)
+import           Prelude                              hiding (Int)
 
 import qualified Data.Attoparsec.ByteString           as ABS
 import qualified Data.Attoparsec.Text                 as AT
@@ -78,6 +79,9 @@ import           Control.Arrow                        ((>>>))
 import           Data.Word
 import qualified Debug.Trace                          as Trace
 
+instance DBEq Integer
+instance DBEq Day
+
 ----------------------------------------------------------------------
 
 newtype EaseFcr = EaseFcr Double
@@ -92,47 +96,47 @@ newtype Quality = Quality Int16
 unQuality :: Quality -> Int16
 unQuality (Quality q) = q
 
-newtype Days = Days Int64
+newtype DayInterval = DayInterval Int64
   deriving (Show, DBType, FromField)
 
-unDays :: Days -> Int64
-unDays (Days i) = i
+unDayInterval :: DayInterval -> Int64
+unDayInterval (DayInterval i) = i
 
 ----------------------------------------------------------------------
 
 mkQuality :: Int16 -> Quality
-mkQuality !n | n < 0 || n > 5 = error "quality out of bounds"
-             | otherwise      = Quality n
+mkQuality n | n < 0 || n > 5 = error "quality out of bounds"
+            | otherwise      = Quality n
 
 mkEaseFcr :: Double -> EaseFcr
-mkEaseFcr !n | n < 1.2 || n > 3.0 = error "easefcr out of bounds"
-             | otherwise          = EaseFcr n
+mkEaseFcr n | n < 1.2 || n > 3.0 = error "easefcr out of bounds"
+            | otherwise          = EaseFcr n
 
 defaultEaseFcr :: EaseFcr
 defaultEaseFcr = EaseFcr 2.5
 
-defaultDaysBase :: Int64
-defaultDaysBase = 1
+defaultDayIntervalBase :: Int64
+defaultDayIntervalBase = 1
 
-defaultDays :: Int64
-defaultDays = 6
+defaultDayInterval :: Int64
+defaultDayInterval = 2
 
 lowerThresholdEaseFcr :: EaseFcr
 lowerThresholdEaseFcr = EaseFcr 1.3
 
-addDaysToUTC :: Days -> UTCTime -> UTCTime
-addDaysToUTC (Days s) = addUTCTime (86400 * fromIntegral s)
+addDayIntervalToUTC :: DayInterval -> Day -> Day
+addDayIntervalToUTC (DayInterval s) = addDays (fromIntegral s)
 
 ----------------------------------------------------------------------
 
 -- | Calculate the interval till the next repetition based
 -- on the quality of a recall event.
-nextRepIval :: EaseFcr -> Quality -> Days
-nextRepIval (EaseFcr ef) (Quality q) = Days (round (go ef q))
+nextRepIval :: EaseFcr -> Quality -> DayInterval
+nextRepIval (EaseFcr ef) (Quality q) = DayInterval (round (go ef q))
  where
-  go _  1 = fromIntegral defaultDaysBase
-  go _  2 = fromIntegral defaultDays
-  go ef n = fromIntegral defaultDays * ef ** (fromIntegral n - 2)
+  go _  1 = fromIntegral defaultDayIntervalBase
+  go _  2 = fromIntegral defaultDayInterval
+  go ef n = fromIntegral defaultDayInterval * ef ** (fromIntegral n - 2)
   -- go item n = go item (n - 1) * (item ^. easeFcr . to unEaseFcr)
 
 -- | Modify the E-factor based on the quality of a single recall.
@@ -155,8 +159,8 @@ data Card f = Card
   { _cardId   :: C f "id"          'HasDefault CardId
   , _easeFcr  :: C f "ease_factor" 'NoDefault  EaseFcr
   , _repsDone :: C f "reps_done"   'NoDefault  Int64
-  , _nextDue  :: C f "next_due"    'NoDefault  UTCTime
-  , _interval :: C f "interval"    'NoDefault  Days
+  , _nextDue  :: C f "next_due"    'NoDefault  Day
+  , _interval :: C f "interval"    'NoDefault  DayInterval
   , _front    :: C f "front"       'NoDefault  Text
   , _back     :: C f "back"        'NoDefault  Text
   } deriving (Generic)
@@ -172,17 +176,20 @@ instance (e ~ Expr, q ~ QueryResult) => Table (Card e) (Card q)
 
 deriving instance (q ~ QueryResult) => Show (Card q)
 
-updateCard :: UTCTime -> CardQ -> Quality -> CardQ
-updateCard curr c@Card {..} q = c { _repsDone = _repsDone'
+updateCard :: Day -> CardQ -> Quality -> CardQ
+updateCard today c@Card {..} q = c { _repsDone = _repsDone'
                                   , _nextDue  = _nextDue'
                                   , _interval = _interval'
                                   , _easeFcr  = _easeFcr'
                                   }
  where
   bad        = unQuality q < 3
+  repeatToday = unQuality q < 4
 
   _interval' = nextRepIval _easeFcr q
-  _nextDue'  = addDaysToUTC _interval' curr
+  _nextDue'  
+    | repeatToday = today
+    | otherwise   = addDayIntervalToUTC _interval' today
 
   _repsDone' | bad       = 1
              | otherwise = _repsDone + 1
@@ -204,7 +211,7 @@ runSelect q conn =
   runResourceT (S.mapM_ (lift . print) (R.select (R.stream conn) q))
 
 parseQuality :: AT.Parser Quality
-parseQuality = Quality <$> AT.decimal
+parseQuality = mkQuality <$> AT.decimal
 
 ----------------------------------------------------------------------
 -- Parsing and loading cards from disk
@@ -288,13 +295,13 @@ streamCardsFrom = streamedTokens >>> S.split StartCard >>> S.mapped
 newlineWord8 :: Word8
 newlineWord8 = fromIntegral (fromEnum '\n')
 
-makeCard :: UTCTime -> (BS.ByteString, BS.ByteString) -> Card Insert
+makeCard :: Day -> (BS.ByteString, BS.ByteString) -> Card Insert
 makeCard curr (front, back) = Card
   { _cardId   = InsertDefault
   , _easeFcr  = lit defaultEaseFcr
   , _repsDone = lit 0
   , _nextDue  = lit curr
-  , _interval = lit (Days 0)
+  , _interval = lit (DayInterval 0)
   , _front    = lit (TE.decodeUtf8 front)
   , _back     = lit (TE.decodeUtf8 back)
   }
@@ -317,7 +324,7 @@ clearAllCards =
 loadCards :: FilePath -> IO ()
 loadCards file = do
   conn <- PGS.connect connInfo
-  curr <- getCurrentTime
+  curr <- utctDay <$> getCurrentTime
   -- R.delete @Card conn (\_ -> lit True)
   withFile file ReadMode $ streamCardsFrom >>> S.mapM_
     ( \(front, back) -> do
@@ -338,24 +345,32 @@ cardsWithFront t = filterQuery (\c -> c ^. front ==. lit t) allCards
 
 ----------------------------------------------------------------------
 
+formattedTime :: Day -> Text
+formattedTime = T.pack . formatTime defaultTimeLocale "%B %d, %Y"
+
+cardsDueOn :: Day -> O.Query (Card Expr)
+cardsDueOn today = filterQuery (\c -> c ^. nextDue ==. lit today) allCards
+
 demo :: IO ()
 demo = do
   conn <- PGS.connect connInfo
-  curr <- getCurrentTime
-  runResourceT $ flip S.mapM_ (R.select (R.stream conn) allCards) $ \c -> do
+  curr <- utctDay <$> getCurrentTime
+  T.putStrLn ("Drill for " <> formattedTime curr)
+  runResourceT $ flip S.mapM_ (R.select (R.stream conn) (cardsDueOn curr)) $ \c -> do
     lift $ do
       T.putStrLn ("\n#" <> tshow (c ^. cardId . _CardId))
       T.putStrLn ("\nFront:\n" <> c ^. front)
       T.putStrLn ("\nBack:\n" <> c ^. back)
-      T.putStrLn ""
-      T.putStrLn (tshow (c ^. easeFcr))
-      T.putStrLn (tshow (c ^. interval))
+      T.putStrLn "\nMetadata:"
+      T.putStrLn ("  " <> tshow (c ^. easeFcr))
+      T.putStrLn ("  " <> tshow (c ^. interval))
+      T.putStrLn ("  " <> c ^. nextDue . to formattedTime)
       T.putStrLn ""
       putStr "Enter quality (0-5 inclusive): "
 
     i' <- AT.parseOnly parseQuality <$> lift T.getLine
     case i' of
-      Left  _ -> lift (T.putStrLn "Error: bad quality")
+      Left  _ -> lift (T.putStrLn "Error: bad quality entered, skipping.")
       Right i -> do
         let upd = updateCard curr c i
 
@@ -364,10 +379,17 @@ demo = do
                  (\_ -> exprOf upd)
 
         lift $ do
-          T.putStrLn ""
-          T.putStrLn (tshow (upd ^. easeFcr))
-          T.putStrLn (tshow (upd ^. interval))
+          T.putStrLn "\nUpdated card:"
+          T.putStrLn ("  " <> tshow (upd ^. easeFcr))
+          T.putStrLn ("  " <> tshow (upd ^. interval))
+          T.putStrLn ("  " <> upd ^. nextDue . to formattedTime)
           T.putStrLn "\n------"
+  pending <- runResourceT $ S.length_ (R.select (R.stream conn) (cardsDueOn curr))
+  T.putStrLn ("Finished drill for " <> formattedTime curr <> ". " <> tshow pending <> " card(s) pending.")
+  when (pending > 0) $ do
+    T.putStr "\nReview pending cards? (y/n): "
+    yn <- T.getLine
+    when (yn == "y") demo
 
 allCards :: O.Query (Card Expr)
 allCards = queryTable
